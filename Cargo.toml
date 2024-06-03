@@ -1,0 +1,12 @@
+[package]
+name = "mandelbrot_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gfx_device_gl = "0.16.2"
+image = "0.25.1"
+num-complex = "0.4.6"
+piston_window = "0.132.0"
+rayon = "1.10.0"
+time = "0.3.36"
