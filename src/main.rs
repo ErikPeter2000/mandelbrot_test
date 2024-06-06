@@ -2,108 +2,120 @@ extern crate gfx_device_gl;
 extern crate image;
 extern crate num_complex;
 extern crate piston_window;
-extern crate time;
 extern crate rayon;
+extern crate time;
 
-use image::{ImageBuffer, Rgba};
-use num_complex::Complex;
+use image::{ImageBuffer, Rgba}; // Image library
+use num_complex::Complex; // Complex number struct
 use piston_window::{
-    clear, Button, Image, MouseButton, MouseCursorEvent, PistonWindow, PressEvent, Texture,
-    TextureSettings, WindowSettings,
-};
-use std::time::{Duration, Instant};
-use rayon::prelude::*;
+    Image, MouseButton, MouseCursorEvent, PistonWindow, Texture, TextureSettings, WindowSettings,
+}; // Windowing library
+use rayon::prelude::*; // Parallel iterator
+use std::cell::RefCell; // Mutable reference cell
+use std::rc::Rc; // Reference counted pointer
 
-struct MandelbrotSettings {
-    width: u32,
-    height: u32,
-    max_iterations: u32,
-    zoom: f64,
-    offset_x: f64,
-    offset_y: f64,
-}
+
+// Import other files
+mod click_handler;
+mod mandelbrot_settings;
+use click_handler::DoubleClickHandler;
+use mandelbrot_settings::MandelbrotSettings;
 
 fn main() {
-    let mut window: PistonWindow = WindowSettings::new("Mandelbrot!", [640, 480])
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 480;
+
+    let mut window: PistonWindow = WindowSettings::new("Mandelbrot!", [WIDTH, HEIGHT]) // Create a window builder object
         .exit_on_esc(true)
-        .build()
-        .unwrap();
+        .build() // Build the window
+        .unwrap(); // Unwrap the result. If it is an error, panic and crash. Otherwise, return the window
 
-    let width = 640;
-    let height = 480;
-
-    let mut settings = MandelbrotSettings {
-        width,
-        height,
+    let settings = Rc::new(RefCell::new(MandelbrotSettings {
+        width: WIDTH,
+        height: HEIGHT,
         max_iterations: 300,
         zoom: 1.,
+        zoom_exp: 1.5,
         offset_x: 0.0,
         offset_y: 0.0,
-    };
+        gamma: 0.22
+    }));
 
-    let click_timeout = Duration::from_millis(500);
-    let mut last_left_click = Instant::now() - click_timeout;
-    let mut last_right_click = Instant::now() - click_timeout;
-    let mut requires_redraw = true;
-    let mut mouse_pos = [0.0, 0.0];
-    let zoom_exp = 1.5;
+    // Mouse position. Use Rc and RefCell to mutate the mouse position in the event loop
+    let mouse_pos = Rc::new(RefCell::new([0.0, 0.0] as [f64; 2]));
 
+    // Clone the settings and mouse_pos to move them into the closures
+    let settings_clone = Rc::clone(&settings);
+    let mouse_pos_clone = Rc::clone(&mouse_pos);
+
+    // Double click handlers. Didn't realise it would get so complicated with borrowing, but good to learn.
+    let left_click_callback = Box::new(move || {
+        let mut settings = settings_clone.borrow_mut();
+        let [xi, yi] = mouse_to_screen(*mouse_pos_clone.borrow(), &*settings);
+        settings.offset_x = xi;
+        settings.offset_y = yi;
+        settings.zoom = settings.zoom.clone() * settings.zoom_exp;
+        true
+    });
+
+    // Clone the settings and mouse_pos for moving to closures
+    let settings_clone = Rc::clone(&settings);
+    let mouse_pos_clone = Rc::clone(&mouse_pos);
+    let right_click_callback = Box::new(move || {
+        let mut settings = settings_clone.borrow_mut();
+        let [xi, yi] = mouse_to_screen(*mouse_pos_clone.borrow(), &*settings);
+        settings.offset_x = xi;
+        settings.offset_y = yi;
+        settings.zoom = settings.zoom.clone() / settings.zoom_exp;
+        true
+    });
+
+    // Create the click handlers
+    let mut left_click_handler = DoubleClickHandler::new(left_click_callback, MouseButton::Left, None);
+    let mut right_click_handler = DoubleClickHandler::new(right_click_callback, MouseButton::Right, None);
+    let mut requires_recalculate: bool = false; // Flag to indicate if the image needs to be recalculated
+
+    // Create a texture from the mandelbrot image to display initially
     let mut image: Texture<gfx_device_gl::Resources> =
-        unwrap_image_to_texture(generate_mandelbrot_image(&settings), &mut window);
+        unwrap_image_to_texture(generate_mandelbrot_buffer(&*settings.borrow()), &mut window);
 
+    // Event loop
     while let Some(event) = window.next() {
+        // Update mouse position
         if let Some(pos) = event.mouse_cursor_args() {
-            mouse_pos = pos;
+            *mouse_pos.borrow_mut() = pos;
         }
 
-        if let Some(Button::Mouse(MouseButton::Left)) = event.press_args() {
-            let [x, y] = mouse_pos;
-                let xi = (x as f64 - width as f64 / 2.) / width as f64 * 4.0 / settings.zoom
-                    + settings.offset_x;
-                let yi = (y as f64 - height as f64 / 2.) / height as f64 * 4.0 / settings.zoom
-                    + settings.offset_y;
-            if is_double_click(&mut last_left_click, click_timeout) {
-                settings.offset_x = xi;
-                settings.offset_y = yi;
-                settings.zoom = settings.zoom.clone() * zoom_exp;
-                requires_redraw = true;
-            }
+        // Handle clicks
+        requires_recalculate |= left_click_handler.handle_if_button_pressed(&event);
+        requires_recalculate |= right_click_handler.handle_if_button_pressed(&event);
+
+        // Recalculate if necessary
+        if requires_recalculate {
+            let buffer = generate_mandelbrot_buffer(&*settings.borrow());
+            image = unwrap_image_to_texture(buffer, &mut window);
+            requires_recalculate = false;
         }
 
-        if let Some(Button::Mouse(MouseButton::Right)) = event.press_args() {
-            if is_double_click(&mut last_right_click, click_timeout) {
-                let [x, y] = mouse_pos;
-                let xi = (x as f64 - width as f64 / 2.) / width as f64 * 4.0 / settings.zoom
-                    + settings.offset_x;
-                let yi = (y as f64 - height as f64 / 2.) / height as f64 * 4.0 / settings.zoom
-                    + settings.offset_y;
-                settings.offset_x = xi;
-                settings.offset_y = yi;
-                settings.zoom = settings.zoom.clone() / zoom_exp;
-                requires_redraw = true;
-            }
-        }
-
-        if requires_redraw {
-            let img = generate_mandelbrot_image(&settings);
-            image = unwrap_image_to_texture(img, &mut window);
-            requires_redraw = false;
-        }
-
+        // Draw
         window.draw_2d(&event, |context, graphics, _| {
-            clear([1.0; 4], graphics);
             Image::new().draw(&image, &Default::default(), context.transform, graphics);
         });
     }
 }
 
-fn is_double_click(last_click: &mut Instant, click_timeout: Duration) -> bool {
-    let now = Instant::now();
-    let is_double_click = now - *last_click < click_timeout;
-    *last_click = now;
-    is_double_click
+/// Convert mouse position to mandelbrot coords.
+fn mouse_to_screen(mouse_pos: [f64; 2], settings: &MandelbrotSettings) -> [f32; 2] {
+    let [x, y] = mouse_pos;
+    [
+        (x as f32 - settings.width as f32 / 2.) / settings.width as f32 * 4.0 / settings.zoom
+            + settings.offset_x,
+        (y as f32 - settings.height as f32 / 2.) / settings.height as f32 * 4.0 / settings.zoom
+            + settings.offset_y,
+    ]
 }
 
+/// Convert an image to a texture for displaying.
 fn unwrap_image_to_texture(
     img: ImageBuffer<Rgba<u8>, Vec<u8>>,
     window: &mut PistonWindow,
@@ -116,35 +128,42 @@ fn unwrap_image_to_texture(
     .unwrap()
 }
 
-fn generate_mandelbrot_image(settings: &MandelbrotSettings) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+/// Generate a mandelbrot image given settings.
+fn generate_mandelbrot_buffer(settings: &MandelbrotSettings) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let mut img = ImageBuffer::new(settings.width, settings.height);
+    let columns = img.width() as usize;
 
-    let width_64 = settings.width as f64;
-    let height_64 = settings.height as f64;
+    // Cache some values to avoid recalculation
+    let width_64 = settings.width as f32;
+    let height_64 = settings.height as f32;
     let width_scale = 4. / settings.zoom / width_64;
     let height_scale = 4. / settings.zoom / height_64;
     let half_width = width_64 / 2.;
     let half_height = height_64 / 2.;
 
-    let length = img.width() as usize;
+    // Iterate over the image in parallel
+    img.as_mut()
+        .par_chunks_mut(columns * 4) // Split the image into rows. *4 is used because each pixel has 4 channels
+        .enumerate() // Enumerate the rows in parallel
+        .for_each(|(y, row)| {
+            let yi = (y as f32 - half_height) * height_scale + settings.offset_y; // Y coord
+            for (x, pixel) in row.chunks_mut(4).enumerate() {
+                let xi = (x as f32 - half_width) * width_scale + settings.offset_x; // X coord
 
-    img.as_mut().par_chunks_mut(length * 4).enumerate().for_each(|(y, row)|{
-        let yi = (y as f64 - half_height) * height_scale + settings.offset_y;
-        for (x, pixel) in row.chunks_mut(4).enumerate() {
-            let xi = (x as f64 - half_width) * width_scale + settings.offset_x;
-            
-            let c = Complex::new(xi, yi);
-            let mut z = Complex::new(xi, yi);
-            let mut i = 0;
-            while i < settings.max_iterations && z.norm_sqr() <= 4. {
-                z = z * z + c;
-                i += 1;
+                // Iterate the mandelbrot function: z = z^2 + c
+                let c = Complex::<f32>::new(xi, yi);
+                let mut z = Complex::<f32>::new(xi, yi);
+                let mut i = 0;
+                while i < settings.max_iterations && z.norm_sqr() <= 4. {
+                    z = z * z + c;
+                    i += 1;
+                }
+
+                let lum =
+                    ((i as f32 / settings.max_iterations as f32).powf(settings.gamma) * 255.0) as u8; // scale final value and correct gamma
+                pixel.copy_from_slice(&[lum, lum, lum, 255]); // set pixel colour
             }
-
-            let h = ((i as f32 / settings.max_iterations as f32).powf(0.22) * 255.) as u8;
-            pixel.copy_from_slice(&[h, h, h, 255 as u8]);
-        }
-    });
+        });
 
     img
 }
